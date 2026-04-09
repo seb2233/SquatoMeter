@@ -7,6 +7,8 @@
 extern bool recording;
 extern bool shouldRestart; 
 extern uint32_t recordingStartTime;
+extern bool bufferPending;
+extern void goToSleep(); 
 
 
 class RemoteControl : public BLECharacteristicCallbacks {

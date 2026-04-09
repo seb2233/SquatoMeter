@@ -16,7 +16,8 @@ public:
 
    
     void update();
-
+    
+    void sleep();
 
     
     float getRoll() const { 

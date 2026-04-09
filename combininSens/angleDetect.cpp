@@ -137,11 +137,11 @@ void angDet::kalman_1d(float &KalmanState,
   //multiply by 0.04 (40ms) to get degrees rotated this step.
   //so if the gyro says we're rotating at 10 deg/s, after 40ms we add 0.4 degrees.
   //BASIC TAKEAWAY: take current angle estimate and add what the gyro has read in the last 40ms (this number was chosen by me)
-  KalmanState = KalmanState + 0.04 * KalmanInput;  //was 0.004 instead of 0.04 before but needed to change it to hav 25hz sync, not 250hz
+  KalmanState = KalmanState + 0.01 * KalmanInput;  //was 0.004 instead of 0.04 before but needed to change it to hav 25hz sync, not 250hz
 
   //with every new predection the drift of the gyro becomes more prevalent
   //4 * 4 represents how noisy and how much we trust the gyro, if the number is bigger there is less trust
-  KalmanUncertainty = KalmanUncertainty + 0.04 * 0.04 * 4 * 4;  //was 0.004 instead of 0.04 before but needed to change it to hav 25hz sync, not 250hz
+  KalmanUncertainty = KalmanUncertainty + 0.01 * 0.01 * 4 * 4;  //was 0.004 instead of 0.04 before but needed to change it to hav 25hz sync, not 250hz
 
   //the KalmanGain number gathered here will tell us how much to trust the acc. correction
   //if number is closer to 1 then we trust the acc. and if closer to 0 we ignore it since it does not need correction
@@ -161,6 +161,20 @@ void angDet::kalman_1d(float &KalmanState,
   Kalman1DOutput[1] = KalmanUncertainty;
 }
 
+
+
+void angDet::sleep() {
+    Wire.beginTransmission(0x68);
+    Wire.write(0x7C);
+    Wire.write(0x03);
+    uint8_t error = Wire.endTransmission();
+    
+    if (error == 0) {
+        Serial.println("IMU suspend  successful");
+    } else {
+        Serial.println("IMU suspend failed ");
+    }
+}
 
 
 void angDet::update() {

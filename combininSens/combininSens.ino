@@ -12,6 +12,9 @@
 #include <BLEServer.h>
 #include <BLE2902.h>
 
+#define WAKE_PIN GPIO_NUM_44
+#define LED_RED  7
+#define LED_GREEN 8
 
 #define SDA_PIN 5
 #define SCL_PIN 6
@@ -20,7 +23,7 @@
 #define SERVICE_UUID        "1a43422c-f676-401b-bdd2-be3d8695ca60"
 #define CHARACTERISTIC_UUID "d8d02583-8540-4411-8b27-deec23578ca3"
 //samples size max sent from Squato-Meter to phone 
-#define MAX_SAMPLES 6500  // 25 Hz * 280 sec ~ 4.2 min
+#define MAX_SAMPLES 35000  // 100 Hz * 280 sec ~ 4.2 min
 
 //mark that there is data to send after recording stops 
 bool bufferPending = false;
@@ -52,8 +55,17 @@ angDet imu(SDA_PIN, SCL_PIN);
 bool recording = false;
 
 
+// tof will have a different sampling rate
+uint32_t lastToFTime = 0;
+const uint32_t tofPeriod = 33; // ~30 Hz
+bool freshToF = false;
+uint16_t lastDist = 0;
+
+
+
+
 uint32_t recordingStartTime = 0; // time at start of recording
-const uint32_t samplePeriod = 40; // 25 Hz
+const uint32_t samplePeriod = 10; // 100 Hz for imu, tof will be the same
 uint32_t lastSampleTime = 0;
 bool shouldRestart = false;  
 
@@ -71,17 +83,41 @@ class MyServerCallbacks:
         //predefined event function found in BLE header file
         void onConnect(BLEServer* pServer) override {
             Serial.println("Device connected");
+            digitalWrite(LED_GREEN, HIGH);  // green on when connected
         }
 
         //same thing here
         void onDisconnect(BLEServer* pServer) override {
             Serial.println("Device disconnected");
+            digitalWrite(LED_GREEN, LOW);   // green off when disconnected
 
             //restart advertising
             BLEDevice::startAdvertising();  
             Serial.println("Advertising restarted");
         }
 };
+
+//sleep
+void goToSleep() {
+    Serial.println("Going to deep sleep...");
+    
+    imu.sleep();
+    delay(100);
+
+    digitalWrite(LED_RED, LOW);
+    digitalWrite(LED_GREEN, LOW);
+    
+    if (BLEDevice::getServer()->getConnectedCount() > 0) {
+        BLEDevice::getServer()->disconnect(0);
+    }
+    delay(500);
+    
+    
+    
+    Serial.println("Sleeping now");
+    delay(100);
+    esp_deep_sleep_start();
+}
 
 
 
@@ -100,6 +136,14 @@ void setup() {
     }
     Serial.printf("Buffer allocated: %d bytes in PSRAM\n", MAX_SAMPLES * sizeof(Sample));
     */
+
+    pinMode(LED_RED, OUTPUT);
+    pinMode(LED_GREEN, OUTPUT);
+    pinMode(WAKE_PIN, INPUT_PULLUP);
+
+    // red on immediately to show device is on
+    digitalWrite(LED_RED, HIGH);
+    digitalWrite(LED_GREEN, LOW);
 
     //set up the sensors from their functions found in their respective header files
     if (!tof.begin()) {
@@ -173,51 +217,88 @@ void sendSampleBLE(Sample &s) {
 
 
 
-
 void loop() {
 
-    //restart enable
+    // button press = restart
+    if (digitalRead(WAKE_PIN) == LOW) {
+        delay(50);
+        if (digitalRead(WAKE_PIN) == LOW) {
+            Serial.println("Button pressed, restarting...");
+            ESP.restart();
+        }
+    }
+
+    //command from phone to restart
     if (shouldRestart) {
         Serial.println("Restarting ESP32...");
         delay(100);
         ESP.restart();
     }
 
-    //send buffered data after stopping the recording 
     if (!recording && bufferPending) {
         delay(10);
-
         for (uint16_t i = 0; i < sampleIndex; i++) {
             sendSampleBLE(buffer[i]);
             delay(3);
         }
-
         sampleIndex = 0;
         bufferPending = false;
     }
 
-
-
     if (recording) {
-    // recording 
-
-        //for timeStamping, number of millis since microController started
         uint32_t now = millis();
 
-        //start timeStamping
         if (recordingStartTime == 0) {
             recordingStartTime = now;
             lastSampleTime = now;
+            lastToFTime = now;
         }
 
-        //had to be moved outside the loop below for performance optimisations    
-        tof.update();    
-        
-        if (now - lastSampleTime >= samplePeriod) { //check if time to collect sample
+        // ToF runs independently at ~30 Hz
+        if (now - lastToFTime >= tofPeriod) {
+            lastToFTime += tofPeriod;
+            if (tof.update()) {         // only if data was ready
+                lastDist = tof.getDistance();
+                freshToF = true;
+            }
+        }
+
+        // IMU runs at 100 Hz
+        if (now - lastSampleTime >= samplePeriod) {
             lastSampleTime += samplePeriod;
-            
-            //functions found the self made header files to update the sensors
             imu.update();
+
+            float timestamp = (millis() - recordingStartTime) / 1000.0f;
+            uint16_t dist   = freshToF ? lastDist : 65535;
+            freshToF = false;
+
+            float roll      = imu.getRoll();
+            float pitch     = imu.getPitch();
+            float accX      = imu.getAccX();
+            float accY      = imu.getAccY();
+            float accZ      = imu.getAccZ();
+            float gyroRoll  = imu.getRateRoll();
+            float gyroPitch = imu.getRatePitch();
+            float gyroYaw   = imu.getRateYaw();
+
+            Sample s = {timestamp, dist, roll, pitch, 
+                        accX, accY, accZ, 
+                        gyroRoll, gyroPitch, gyroYaw};
+
+            if (sampleIndex < MAX_SAMPLES) {
+                buffer[sampleIndex++] = s;
+                bufferPending = true;
+            }
+
+            sendSampleBLE(s);
+
+
+        }
+    }
+}
+
+
+
 
             //debugging sync. issues
             /*
@@ -230,33 +311,9 @@ void loop() {
             imu.update();
             uint32_t t4 = micros();
             Serial.print("imu: "); Serial.println(t4 - t3);
-            */
-
-            //gather the data in variables
-            float timestamp = (millis() - recordingStartTime) / 1000.0f;
-            uint16_t dist   = tof.getDistance();
-            float roll      = imu.getRoll();
-            float pitch     = imu.getPitch();
-            float accX      = imu.getAccX();
-            float accY      = imu.getAccY();
-            float accZ      = imu.getAccZ();
-            float gyroRoll  = imu.getRateRoll();
-            float gyroPitch = imu.getRatePitch();
-            float gyroYaw   = imu.getRateYaw();
 
 
-
-            Sample s = {timestamp, dist, roll, pitch, accX, accY, accZ, gyroRoll, gyroPitch, gyroYaw};
-
-            // add to buffer the data recorded
-            if (sampleIndex < MAX_SAMPLES) {
-                buffer[sampleIndex++] = s;
-                bufferPending = true;  // mark that we have data to send later
-            }
-
-            // Live preview — send one sample at a time during recording
-            sendSampleBLE(s);
-
+                        // keep serial for debugging, remove later for performance
             Serial.print("Time: "); Serial.print(timestamp, 2);
             Serial.print(" | Dist: "); Serial.print(dist);
             Serial.print(" | Roll: "); Serial.print(roll, 2);
@@ -269,9 +326,5 @@ void loop() {
             Serial.print(gyroRoll, 2); Serial.print(", ");
             Serial.print(gyroPitch, 2); Serial.print(", ");
             Serial.println(gyroYaw, 2);
-            
-        }
-    }
-}
-
+            */
 
